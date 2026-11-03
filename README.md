@@ -1,28 +1,21 @@
-# device-event-ingest
+# device-event-service
 
-Service for ingesting device events (NestJS).
+Service for ingesting device events.
 
-## Project setup
+## How to run
+
+Requirements: Node.js 20+, Docker.
 
 ```bash
-$ npm install
+npm install
+docker compose up -d   # Postgres on localhost:5433
 ```
 
-## Compile and run the project
+## How to run the tests
 
 ```bash
-# development
-$ npm run start
-
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+npm test               # unit tests
+docker compose up -d   # e2e tests need Postgres
+npm run test:e2e
 ```
 
-## Run tests
-
-```bash
-# unit tests
-$ npm run test
