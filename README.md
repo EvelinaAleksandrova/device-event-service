@@ -1,4 +1,4 @@
-# device-events-service
+# device-event-service
 
 Service for ingesting device events.
 
