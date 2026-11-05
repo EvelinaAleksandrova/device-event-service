@@ -13,3 +13,5 @@ export type DeviceState = Pick<
   Device,
   'arm_state' | 'arm_mode' | 'open_sensors'
 >;
+
+export type DeviceSummary = Pick<Device, 'id' | 'last_seen_at'>;
