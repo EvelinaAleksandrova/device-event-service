@@ -13,6 +13,14 @@ import { DeviceEventDto } from './dto/device-event.dto';
 import { DeviceEventResponseDto } from './dto/device-event-response.dto';
 import { DeviceListResponseDto } from './dto/device-list-response.dto';
 import { DeviceResponseDto } from './dto/device-response.dto';
+import {
+  EventHistoryQueryDto,
+  toEventHistoryQuery,
+} from './dto/event-history-query.dto';
+import {
+  EventHistoryResponseDto,
+  nextPageUrl,
+} from './dto/event-history-response.dto';
 import { ListDevicesQueryDto } from './dto/list-devices-query.dto';
 import type { Response } from 'express';
 
@@ -32,6 +40,19 @@ export class DevicesController {
     // 201 for a new event, 200 for a duplicate; the body is the stored event either way.
     res.status(created ? HttpStatus.CREATED : HttpStatus.OK);
     return new DeviceEventResponseDto(event);
+  }
+
+  @Get(':id/events')
+  async findEvents(
+    @Param('id') id: string,
+    @Query() queryDto: EventHistoryQueryDto,
+  ): Promise<EventHistoryResponseDto> {
+    const query = toEventHistoryQuery(queryDto);
+    const page = await this.devicesService.findEvents(id, query);
+    return new EventHistoryResponseDto(
+      page.events,
+      nextPageUrl(id, query.limit, page.nextCursor),
+    );
   }
 
   @Get()

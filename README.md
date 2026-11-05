@@ -4,7 +4,7 @@ Service for ingesting device events. It records events from security panels and 
 
 ## How to run
 
-Requirements: Node.js 22+, Docker.
+Requirements: Node.js 26+, Docker.
 
 ```bash
 npm install
@@ -154,6 +154,50 @@ An unknown `status` returns:
 { "error": true, "message": "status must be one of online, offline" }
 ```
 
+### GET /devices/{id}/events[?since=&limit=]
+
+Returns the device's event history, oldest first by `occurred_at`. Events with the same `occurred_at` come back in arrival order. Follow `next` until it is `null` to walk the full history.
+
+| Parameter | Rule                                                                                       |
+| --------- | ------------------------------------------------------------------------------------------ |
+| `since`   | Optional. UTC ISO 8601 timestamp ending in `Z`, the same rule as `occurred_at`. Inclusive. |
+| `limit`   | Optional. Integer from 1 to 500, default 50. Digits only, so `1e2` or `2.5` is a 400.      |
+| `cursor`  | Set by the service in `next`; clients don't build it. Malformed or unknown returns 400.    |
+
+```bash
+curl -i "http://localhost:3000/devices/panel-0042/events?since=2026-09-29T13:00:00Z&limit=2" -H "X-Device-Token: dev-shared-token"
+curl -i "http://localhost:3000/devices/panel-0042/events?limit=2&cursor=17" -H "X-Device-Token: dev-shared-token"
+```
+
+```json
+{
+  "events": [
+    {
+      "event_id": "7c1e9a52-3b0f-4d8e-9a61-2f4b8c0d1e77",
+      "type": "armed",
+      "occurred_at": "2026-09-29T14:00:00Z",
+      "payload": { "mode": "away", "user_id": 3 }
+    },
+    {
+      "event_id": "0b3f6c1d-58a4-4e2b-9f07-6d2a1c8e4b90",
+      "type": "heartbeat",
+      "occurred_at": "2026-09-29T14:01:00Z",
+      "payload": { "battery_pct": 87, "rssi_dbm": -71 }
+    }
+  ],
+  "next": "/devices/panel-0042/events?limit=2&cursor=17"
+}
+```
+
+`next` is `null` on the last page. A device that exists but has no events at or after `since` returns `{ "events": [], "next": null }`.
+
+| Status | When                                                            |
+| ------ | --------------------------------------------------------------- |
+| 200    | The device exists, even when no event matches.                  |
+| 400    | Invalid `since` or `limit`, or a malformed or unknown `cursor`. |
+| 401    | Missing or wrong `X-Device-Token`.                              |
+| 404    | The device has never sent a valid event.                        |
+
 ### Errors
 
 Every error, on any route, has the same body:
@@ -175,17 +219,37 @@ Every error, on any route, has the same body:
 
 ## Design decisions
 
+- **NestJS**: I use it every day. Its guards, `ValidationPipe` and dependency injection cover the token check, input validation and the injectable `Clock` without extra libraries.
+- **Postgres**: The ingest endpoint relies on its transactions and `SELECT ... FOR UPDATE` to apply concurrent events correctly, and it supports partitioning for the 10x case.
+- **Plain `pg`, no ORM**: for clear code. Every query is visible SQL, including `ON CONFLICT` for the dedupe and the row comparison behind the history cursor.
 - **Dedupe in the database.** `(device_id, event_id)` is the primary key and the insert uses `ON CONFLICT DO NOTHING`, so even a simultaneous retry is stored once.
 - Each event is saved in one transaction that locks the device row, so concurrent events can't overwrite each other.
 - The `devices` table holds each device's current state, updated by every new event.
 - **One error shape.** A global exception filter returns every error as `{ error, message }`.
+
+### History pagination
+
+- **Cursor, not offset.** The client only walks forward through `next`. `OFFSET` reads and discards every earlier row, so each page gets slower; the cursor starts from the previous page's last event through the `(device_id, occurred_at, seq)` index, so every page costs about the same.
+- **`seq` breaks ties.** Several events can share an `occurred_at`; a cursor on the timestamp alone would skip them or repeat a page forever. `seq` is an identity column, so `(occurred_at, seq)` is unique and same-time events come back in arrival order, which the task says is the order they occurred.
+- **The cursor is only a `seq`.** The query reads that event's `occurred_at` in SQL. Postgres keeps microseconds but a JS `Date` doesn't, so a timestamp in the cursor could repeat an event.
+- **An unknown cursor is a 400**, not an empty page that looks like the end of the history.
+- **`limit + 1` rows** are fetched, so the last page already returns `next: null`.
+- **`next` is a relative URL** and doesn't repeat `since`: every event after the cursor is at or after it.
+
+**Tradeoffs**
+
+- No jumping to a page or total count; the task only asks to walk forward.
+- A schema change: a `seq` column, a unique index on it for the cursor lookup, and the history index.
+- Two queries per page: one checks the device and cursor (404/400), then the page query.
+- `seq` is global, so cursors reveal roughly how many events are stored.
 
 ## Assumptions
 
 - The device id is any string. A device is created by its first event; there is no registration step.
 - All devices share one `DEVICE_TOKEN`, so anyone with it can send events for any device.
 - A retry with the same `event_id` but a different body returns the stored event.
-- Events arrive in the order they occurred, as the task allows. They're applied in arrival order; `occurred_at` is stored but not used for ordering.
+- Events arrive in the order they occurred, as the task allows. They're applied in arrival order; `occurred_at` is used only to order the event history.
+- `since` is optional; without it the history starts at the device's first event. A history request for a device that has never sent an event is a 404, as for `GET /devices/{id}`.
 - `last_seen_at` is the server time of the last new event. Duplicates and invalid events don't change it.
 - Users are managed by another system. `user_id` is only checked to be a positive integer; unknown users aren't rejected.
 - Heartbeat values have no range check, so an odd reading never rejects a heartbeat.
@@ -207,3 +271,13 @@ I used Claude Code for these parts:
 - The GitHub Actions workflow: I wrote a draft, and Claude Code fixed it so it runs lint, the formatting check, the build, unit tests, e2e tests against the compose Postgres, and the image build.
 - The Dockerfile: I wrote the first version, and Claude Code turned it into a multi-stage Alpine build that ships only production dependencies.
 - `docker-compose.yml`: I wrote the Postgres service, and Claude Code added the `app` service that waits for Postgres and connects to it by service name.
+- The history API: I chose cursor pagination; Claude Code proposed the `seq` cursor read in SQL and wrote the endpoint, the query DTO and the tests, and I reviewed them.
+
+## Extension: History API
+
+I chose the History API because pagination is something I work with every day. At work we mainly use offset-style pagination (offset or page number), because our users move between numbered pages. This task is a different case: clients only walk forward through `next`, and the history grows with every heartbeat. So I chose keyset (cursor) pagination here, and the "History pagination" section explains why.
+
+## What would change at 10x scale
+
+- **Retention.** Heartbeats are most of the rows (one per device per minute), only matter for recent history and don't affect device state, so they can be deleted after a few days. Other events are deleted after a set period, for example 3 to 12 months. A client paging through history that has been deleted gets `cursor is invalid`.
+- **Partition `device_events` by `occurred_at`.** Retention then drops whole old partitions instead of running large `DELETE`s, which are slow and leave dead rows for vacuum. The tradeoff: Postgres requires the partition column in the primary key, so the dedupe key becomes `(device_id, event_id, occurred_at)`. A resent event keeps its `occurred_at`, so it is still caught; `received_at` would not work, since a retry arrives at a new server time.
