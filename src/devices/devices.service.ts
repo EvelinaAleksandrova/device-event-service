@@ -1,20 +1,38 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { Database } from '../database/database';
 import { DeviceEventDto } from './dto/device-event.dto';
-import { DeviceState } from './entities/device';
+import { Device, DeviceState, DeviceSummary } from './entities/device';
 import { DeviceEvent } from './entities/device-event';
 import { applyEvent } from './apply-event';
+import { ConfigService } from '@nestjs/config';
+import { onlineCutoff, statusAt } from './device-status';
+import { DeviceStatus } from './enums/device-status.enum';
+import { Clock } from '../shared/clock';
 
 @Injectable()
 export class DevicesService {
-  constructor(private readonly db: Database) {}
+  private readonly offlineAfterMs: number;
+
+  constructor(
+    private readonly db: Database,
+    private readonly clock: Clock,
+    configService: ConfigService,
+  ) {
+    const seconds = Number(
+      configService.get<string>('OFFLINE_AFTER_SECONDS', '300'),
+    );
+    if (!Number.isInteger(seconds) || seconds <= 0) {
+      throw new Error('OFFLINE_AFTER_SECONDS must be a positive integer');
+    }
+    this.offlineAfterMs = seconds * 1000;
+  }
 
   async ingestEvent(
     id: string,
     dto: DeviceEventDto,
   ): Promise<{ created: boolean; event: DeviceEvent }> {
     const client = await this.db.pool.connect();
-    const now = new Date();
+    const now = this.clock.now();
     try {
       await client.query('BEGIN');
 
@@ -64,6 +82,58 @@ export class DevicesService {
       throw err;
     } finally {
       client.release();
+    }
+  }
+
+  async findOne(id: string): Promise<{ device: Device; status: DeviceStatus }> {
+    const result = await this.db.pool.query<Device>(
+      `SELECT id, last_seen_at, arm_state, arm_mode, open_sensors
+       FROM devices WHERE id = $1`,
+      [id],
+    );
+    const device = result.rows[0];
+    if (!device) {
+      throw new NotFoundException(`Device ${id} not found`);
+    }
+    const status = statusAt(
+      device.last_seen_at,
+      this.clock.now(),
+      this.offlineAfterMs,
+    );
+    return { device, status };
+  }
+
+  async findAll(
+    status?: DeviceStatus,
+  ): Promise<{ device: DeviceSummary; status: DeviceStatus }[]> {
+    const now = this.clock.now();
+    const result = await this.selectSummaries(
+      status,
+      onlineCutoff(now, this.offlineAfterMs),
+    );
+    // The same `now` as the filter, so each row's status matches the filter.
+    return result.rows.map((device) => ({
+      device,
+      status: statusAt(device.last_seen_at, now, this.offlineAfterMs),
+    }));
+  }
+
+  private selectSummaries(status: DeviceStatus | undefined, cutoff: Date) {
+    switch (status) {
+      case DeviceStatus.ONLINE:
+        return this.db.pool.query<DeviceSummary>(
+          `SELECT id, last_seen_at FROM devices WHERE last_seen_at >= $1 ORDER BY id`,
+          [cutoff],
+        );
+      case DeviceStatus.OFFLINE:
+        return this.db.pool.query<DeviceSummary>(
+          `SELECT id, last_seen_at FROM devices WHERE last_seen_at < $1 ORDER BY id`,
+          [cutoff],
+        );
+      default:
+        return this.db.pool.query<DeviceSummary>(
+          `SELECT id, last_seen_at FROM devices ORDER BY id`,
+        );
     }
   }
 }
