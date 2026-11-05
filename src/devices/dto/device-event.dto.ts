@@ -9,8 +9,7 @@ import {
 import { Type } from 'class-transformer';
 import { DeviceEventType } from '../enums/device-event-type.enum';
 import { getPayloadClass, type EventPayload } from './payload.dto';
-
-const UTC_ISO_8601 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
+import { UTC_ISO_8601 } from '../../shared/utc-iso-8601';
 
 export class DeviceEventDto {
   @IsUUID()

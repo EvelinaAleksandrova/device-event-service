@@ -25,8 +25,13 @@ CREATE TABLE IF NOT EXISTS device_events (
     payload JSONB NOT NULL,
     -- Server time the event was first received.
     received_at TIMESTAMPTZ NOT NULL,
+    -- Arrival order. Breaks occurred_at ties in the history API, and its cursor
+    -- is a seq, so the cursor never carries a timestamp.
+    seq BIGINT GENERATED ALWAYS AS IDENTITY,
     -- The dedupe: a resent event_id for the same device is ignored.
     CONSTRAINT device_events_pkey PRIMARY KEY (device_id, event_id),
+    -- Lets the history API find a cursor's event without scanning the device's events.
+    CONSTRAINT device_events_seq_key UNIQUE (seq),
     CONSTRAINT device_events_type_check CHECK (
         type IN (
             'armed',
@@ -37,3 +42,6 @@ CREATE TABLE IF NOT EXISTS device_events (
         )
     )
 );
+
+-- Serves GET /devices/{id}/events: one device's events in history order.
+CREATE INDEX IF NOT EXISTS device_events_history_idx ON device_events (device_id, occurred_at, seq);

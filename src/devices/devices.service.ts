@@ -1,13 +1,24 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { Database } from '../database/database';
 import { DeviceEventDto } from './dto/device-event.dto';
+import { EventHistoryQuery } from './dto/event-history-query.dto';
 import { Device, DeviceState, DeviceSummary } from './entities/device';
-import { DeviceEvent } from './entities/device-event';
+import { DeviceEvent, HistoryEvent } from './entities/device-event';
 import { applyEvent } from './apply-event';
 import { ConfigService } from '@nestjs/config';
 import { onlineCutoff, statusAt } from './device-status';
 import { DeviceStatus } from './enums/device-status.enum';
 import { Clock } from '../shared/clock';
+
+export interface EventPage {
+  events: HistoryEvent[];
+  // The seq of the page's last event, or null on the last page.
+  nextCursor: string | null;
+}
 
 @Injectable()
 export class DevicesService {
@@ -116,6 +127,56 @@ export class DevicesService {
       device,
       status: statusAt(device.last_seen_at, now, this.offlineAfterMs),
     }));
+  }
+
+  async findEvents(
+    deviceId: string,
+    query: EventHistoryQuery,
+  ): Promise<EventPage> {
+    await this.assertHistoryReadable(deviceId, query.cursor);
+    // The cursor's occurred_at is read in SQL, not passed back from JS: a JS
+    // Date drops microseconds, which would repeat the boundary event.
+    // One extra row tells whether another page exists, so next never leads to an empty page.
+    const result = await this.db.pool.query<HistoryEvent>(
+      `SELECT event_id, type, occurred_at, payload, seq
+       FROM device_events
+       WHERE device_id = $1
+         AND ($2::timestamptz IS NULL OR occurred_at >= $2)
+         AND ($3::bigint IS NULL OR (occurred_at, seq) > (
+           SELECT occurred_at, seq FROM device_events
+           WHERE device_id = $1 AND seq = $3
+         ))
+       ORDER BY occurred_at, seq
+       LIMIT $4`,
+      [deviceId, query.since ?? null, query.cursor ?? null, query.limit + 1],
+    );
+    const events = result.rows.slice(0, query.limit);
+    const hasMore = result.rows.length > query.limit;
+    return {
+      events,
+      nextCursor: hasMore ? events[events.length - 1].seq : null,
+    };
+  }
+
+  // A missing cursor event would make the main query match nothing, which
+  // looks like the end of the history, so it is an error instead.
+  private async assertHistoryReadable(deviceId: string, cursor?: string) {
+    const result = await this.db.pool.query<{
+      device_exists: boolean;
+      cursor_exists: boolean;
+    }>(
+      `SELECT
+         EXISTS (SELECT 1 FROM devices WHERE id = $1) AS device_exists,
+         EXISTS (SELECT 1 FROM device_events WHERE device_id = $1 AND seq = $2) AS cursor_exists`,
+      [deviceId, cursor ?? null],
+    );
+    const { device_exists, cursor_exists } = result.rows[0];
+    if (!device_exists) {
+      throw new NotFoundException(`Device ${deviceId} not found`);
+    }
+    if (cursor !== undefined && !cursor_exists) {
+      throw new BadRequestException('cursor is invalid');
+    }
   }
 
   private selectSummaries(status: DeviceStatus | undefined, cutoff: Date) {
