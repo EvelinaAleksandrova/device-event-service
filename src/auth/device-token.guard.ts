@@ -4,14 +4,15 @@ import {
   ExecutionContext,
   UnauthorizedException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Request } from 'express';
 
 @Injectable()
 export class DeviceTokenGuard implements CanActivate {
   private readonly token: string;
 
-  constructor() {
-    const token = process.env.DEVICE_TOKEN;
+  constructor(configService: ConfigService) {
+    const token = configService.get<string>('DEVICE_TOKEN');
     if (!token) {
       throw new Error('DEVICE_TOKEN environment variable is not set');
     }

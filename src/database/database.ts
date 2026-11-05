@@ -4,6 +4,7 @@ import {
   OnApplicationShutdown,
   OnModuleInit,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Pool } from 'pg';
 
 @Injectable()
@@ -11,8 +12,8 @@ export class Database implements OnModuleInit, OnApplicationShutdown {
   private readonly logger = new Logger(Database.name);
   readonly pool: Pool;
 
-  constructor() {
-    const connectionString = process.env.DATABASE_URL;
+  constructor(configService: ConfigService) {
+    const connectionString = configService.get<string>('DATABASE_URL');
     if (!connectionString) {
       throw new Error('DATABASE_URL environment variable is not set');
     }
