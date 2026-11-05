@@ -9,7 +9,7 @@ Requirements: Node.js 22+, Docker.
 ```bash
 npm install
 docker compose up -d --wait   # Postgres on localhost:5433
-cp .env.example .env          # PORT, DATABASE_URL, DEVICE_TOKEN
+cp .env.example .env          # PORT, DATABASE_URL, DEVICE_TOKEN, OFFLINE_AFTER_SECONDS
 npm run start:dev             # http://localhost:3000
 ```
 
@@ -77,6 +77,74 @@ Both 201 and 200 return the stored event:
 | 400    | Invalid body.                                                     |
 | 401    | Missing or wrong `X-Device-Token`.                                |
 
+### GET /devices/{id}
+
+Returns the device's current state. `status` is `offline` once more than `OFFLINE_AFTER_SECONDS` (default 300) have passed since `last_seen_at`, and `online` otherwise.
+
+```bash
+curl -i http://localhost:3000/devices/panel-0042 -H "X-Device-Token: dev-shared-token"
+```
+
+```json
+{
+  "device_id": "panel-0042",
+  "status": "online",
+  "last_seen_at": "2026-09-29T14:02:00Z",
+  "arm_state": "armed",
+  "arm_mode": "away",
+  "open_sensors": [4, 7]
+}
+```
+
+| Status | When                                     |
+| ------ | ---------------------------------------- |
+| 200    | The device exists.                       |
+| 401    | Missing or wrong `X-Device-Token`.       |
+| 404    | The device has never sent a valid event. |
+
+### GET /devices[?status={online|offline}]
+
+Lists the devices, sorted by `device_id`. The `status` query parameter is optional. A device is `offline` once more than `OFFLINE_AFTER_SECONDS` (default 300) have passed since its `last_seen_at`, and `online` otherwise, the same as in `GET /devices/{id}`. No match returns `{ "devices": [] }`.
+
+| Request                       | Result                                                     |
+| ----------------------------- | ---------------------------------------------------------- |
+| `GET /devices`                | All devices, online and offline, each with its own status. |
+| `GET /devices?status=online`  | Only online devices.                                       |
+| `GET /devices?status=offline` | Only offline devices.                                      |
+| `GET /devices?status=foo`     | 400 with an error listing the allowed values.              |
+
+```bash
+curl -i http://localhost:3000/devices -H "X-Device-Token: dev-shared-token"
+curl -i "http://localhost:3000/devices?status=online" -H "X-Device-Token: dev-shared-token"
+curl -i "http://localhost:3000/devices?status=offline" -H "X-Device-Token: dev-shared-token"
+```
+
+`GET /devices?status=offline` returns:
+
+```json
+{
+  "devices": [
+    {
+      "device_id": "panel-0042",
+      "status": "offline",
+      "last_seen_at": "2026-09-29T14:02:00Z"
+    }
+  ]
+}
+```
+
+| Status | When                                                      |
+| ------ | --------------------------------------------------------- |
+| 200    | A valid or missing `status`, even when no device matches. |
+| 400    | `status` is empty, repeated, or not `online`/`offline`.   |
+| 401    | Missing or wrong `X-Device-Token`.                        |
+
+An unknown `status` returns:
+
+```json
+{ "error": true, "message": "status must be one of online, offline" }
+```
+
 ### Errors
 
 Every error, on any route, has the same body:
@@ -88,12 +156,13 @@ Every error, on any route, has the same body:
 }
 ```
 
-| Status | When                               | `message`                                                    |
-| ------ | ---------------------------------- | ------------------------------------------------------------ |
-| 400    | Invalid body or malformed JSON.    | Every failed validation rule, separated by `; `.             |
-| 401    | Missing or wrong `X-Device-Token`. | `Missing or wrong X-Device-Token`                            |
-| 404    | Unknown route.                     | e.g. `Cannot GET /no-such-route`                             |
-| 500    | Unexpected error in the service.   | Always `Internal server error`. The details are only logged. |
+| Status | When                                   | `message`                                                    |
+| ------ | -------------------------------------- | ------------------------------------------------------------ |
+| 400    | Invalid body, query or malformed JSON. | Every failed validation rule, separated by `; `.             |
+| 401    | Missing or wrong `X-Device-Token`.     | `Missing or wrong X-Device-Token`                            |
+| 404    | Unknown device.                        | e.g. `Device panel-0042 not found`                           |
+| 404    | Unknown route.                         | e.g. `Cannot GET /no-such-route`                             |
+| 500    | Unexpected error in the service.       | Always `Internal server error`. The details are only logged. |
 
 ## Design decisions
 
@@ -112,6 +181,8 @@ Every error, on any route, has the same body:
 - Users are managed by another system. `user_id` is only checked to be a positive integer; unknown users aren't rejected.
 - Heartbeat values have no range check, so an odd reading never rejects a heartbeat.
 - Unknown payload fields are dropped.
+- Status is computed when the device is read, not stored, so it is never stale. A device turns offline only once more than OFFLINE_AFTER_SECONDS (default 300) have passed since last_seen_at; at exactly 300 seconds it is still online.
+- The spec makes only an unknown status filter a 400, so `GET /devices` without `status` lists every device. An empty or repeated `status` counts as unknown.
 
 ## Where I used AI tools
 
@@ -121,4 +192,6 @@ I used Claude Code for these parts:
 - The `Database` class that connects to Postgres.
 - DTO validation and dedupe: I wrote the first version, and Claude Code extended both.
 - The global exception filter: I wrote it, and Claude Code fixed how it reports validation errors and registered it.
-- Reviewing this README and writing the API reference and the setup and test notes.
+- Reviewing this README and writing the API reference with its `curl` examples, and the setup and test notes.
+- The status endpoints: I wrote the first version, and Claude Code fixed it and added the routes and DTOs.
+- The injectable `Clock` and the test `FakeClock`: Claude Code suggested them and I approved, so tests set the time instead of waiting.
