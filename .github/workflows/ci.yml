@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          # Same major as the Dockerfile base image.
+          node-version: 26
+          cache: npm
+
+      - run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Check formatting
+        run: npx prettier --check "src/**/*.ts" "test/**/*.ts"
+
+      - name: Build
+        run: npm run build
+
+      - name: Unit tests
+        run: npm test
+
+      # Reuse the compose service so CI loads the same db/schema.sql as local dev.
+      - name: Start Postgres
+        run: docker compose up -d --wait postgres
+
+      - name: e2e tests
+        run: npm run test:e2e
+        env:
+          DATABASE_URL: postgres://ingest:ingest@localhost:5433/device_events
+
+      - name: Build image
+        run: docker build -t device-event-service .
