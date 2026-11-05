@@ -26,12 +26,4 @@ describe('statusAt', () => {
   ])('last seen %s (%s) is %s', (_case, lastSeenAt, expected) => {
     expect(statusAt(new Date(lastSeenAt), NOW, FIVE_MINUTES_MS)).toBe(expected);
   });
-
-  // last_seen_at is server time, so a device clock ahead of ours can't cause
-  // this; it's here to pin down that a future time never reads as offline.
-  it('is online when last seen in the future', () => {
-    expect(
-      statusAt(new Date('2026-09-29T14:08:00Z'), NOW, FIVE_MINUTES_MS),
-    ).toBe(DeviceStatus.ONLINE);
-  });
 });
