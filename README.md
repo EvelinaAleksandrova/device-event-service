@@ -8,18 +8,27 @@ Requirements: Node.js 22+, Docker.
 
 ```bash
 npm install
-docker compose up -d --wait   # Postgres on localhost:5433
-cp .env.example .env          # PORT, DATABASE_URL, DEVICE_TOKEN, OFFLINE_AFTER_SECONDS
-npm run start:dev             # http://localhost:3000
+docker compose up -d --wait postgres   # Postgres on localhost:5433
+cp .env.example .env                   # PORT, DATABASE_URL, DEVICE_TOKEN, OFFLINE_AFTER_SECONDS
+npm run start:dev                      # http://localhost:3000
 ```
 
-`db/schema.sql` is loaded only when the Postgres volume is first created. If your volume is older than the current schema, recreate it with `docker compose down -v && docker compose up -d --wait`. This deletes all stored data.
+`db/schema.sql` is loaded only when the Postgres volume is first created. If your volume is older than the current schema, recreate it with `docker compose down -v && docker compose up -d --wait postgres`. This deletes all stored data.
+
+### Run everything in Docker
+
+```bash
+cp .env.example .env                   # DEVICE_TOKEN and OFFLINE_AFTER_SECONDS are read from here
+docker compose up -d --build --wait    # service on http://localhost:3000, Postgres on localhost:5433
+```
+
+Inside Docker the service reaches Postgres at `postgres:5432`; compose sets this `DATABASE_URL` itself, overriding the one in `.env`. Stop `npm run start:dev` first, since both use port 3000.
 
 ## How to run the tests
 
 ```bash
-npm test                      # unit tests
-docker compose up -d --wait   # e2e tests need Postgres
+npm test                               # unit tests
+docker compose up -d --wait postgres   # e2e tests need Postgres
 npm run test:e2e
 ```
 
@@ -181,7 +190,7 @@ Every error, on any route, has the same body:
 - Users are managed by another system. `user_id` is only checked to be a positive integer; unknown users aren't rejected.
 - Heartbeat values have no range check, so an odd reading never rejects a heartbeat.
 - Unknown payload fields are dropped.
-- Status is computed when the device is read, not stored, so it is never stale. A device turns offline only once more than OFFLINE_AFTER_SECONDS (default 300) have passed since last_seen_at; at exactly 300 seconds it is still online.
+- Status is computed when the device is read, not stored, so it is never stale. A device turns offline only once more than `OFFLINE_AFTER_SECONDS` (default 300) have passed since `last_seen_at`; at exactly `OFFLINE_AFTER_SECONDS` it is still online.
 - The spec makes only an unknown status filter a 400, so `GET /devices` without `status` lists every device. An empty or repeated `status` counts as unknown.
 
 ## Where I used AI tools
@@ -193,5 +202,8 @@ I used Claude Code for these parts:
 - DTO validation and dedupe: I wrote the first version, and Claude Code extended both.
 - The global exception filter: I wrote it, and Claude Code fixed how it reports validation errors and registered it.
 - Reviewing this README and writing the API reference with its `curl` examples, and the setup and test notes.
-- The status endpoints: I wrote the first version, and Claude Code fixed it and added the routes and DTOs.
-- The injectable `Clock` and the test `FakeClock`: Claude Code suggested them and I approved, so tests set the time instead of waiting.
+- The status endpoints: I wrote the first version, and Claude Code fixed them and added the routes and DTOs.
+- The injectable `Clock` and the test `FakeClock`: Claude Code suggested them, I approved, and Claude Code wrote them, so tests set the time instead of waiting.
+- The GitHub Actions workflow: I wrote a draft, and Claude Code fixed it so it runs lint, the formatting check, the build, unit tests, e2e tests against the compose Postgres, and the image build.
+- The Dockerfile: I wrote the first version, and Claude Code turned it into a multi-stage Alpine build that ships only production dependencies.
+- `docker-compose.yml`: I wrote the Postgres service, and Claude Code added the `app` service that waits for Postgres and connects to it by service name.
