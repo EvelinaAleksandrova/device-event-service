@@ -77,28 +77,48 @@ Both 201 and 200 return the stored event:
 | 400    | Invalid body.                                                     |
 | 401    | Missing or wrong `X-Device-Token`.                                |
 
+### Errors
+
+Every error, on any route, has the same body:
+
+```json
+{
+  "error": true,
+  "message": "event_id must be a UUID; type must be one of armed, disarmed, sensor_opened, sensor_closed, heartbeat"
+}
+```
+
+| Status | When                               | `message`                                                    |
+| ------ | ---------------------------------- | ------------------------------------------------------------ |
+| 400    | Invalid body or malformed JSON.    | Every failed validation rule, separated by `; `.             |
+| 401    | Missing or wrong `X-Device-Token`. | `Missing or wrong X-Device-Token`                            |
+| 404    | Unknown route.                     | e.g. `Cannot GET /no-such-route`                             |
+| 500    | Unexpected error in the service.   | Always `Internal server error`. The details are only logged. |
+
 ## Design decisions
 
-- **Dedupe in the database.** `(device_id, event_id)` is the primary key of `device_events`, and the insert uses `ON CONFLICT DO NOTHING`, so a retry that arrives at the same time as the original is still stored once.
-- Each event is saved in one transaction that locks the device row, so two events for the same device can't overwrite each other.
-- The current state of each device is kept in the `devices` table and updated with every new event.
+- **Dedupe in the database.** `(device_id, event_id)` is the primary key and the insert uses `ON CONFLICT DO NOTHING`, so even a simultaneous retry is stored once.
+- Each event is saved in one transaction that locks the device row, so concurrent events can't overwrite each other.
+- The `devices` table holds each device's current state, updated by every new event.
+- **One error shape.** A global exception filter returns every error as `{ error, message }`.
 
 ## Assumptions
 
-- The device id can be any string, without a specific format. A device is created by its first event; there is no registration step.
-- All devices share one `DEVICE_TOKEN`, and the token isn't tied to a device id, so anyone with the token can send events for any device.
+- The device id is any string. A device is created by its first event; there is no registration step.
+- All devices share one `DEVICE_TOKEN`, so anyone with it can send events for any device.
 - A retry with the same `event_id` but a different body returns the stored event.
-- Each device's events arrive in the order they occurred, as the task allows. The service applies them in arrival order and stores `occurred_at` without using it for ordering.
+- Events arrive in the order they occurred, as the task allows. They're applied in arrival order; `occurred_at` is stored but not used for ordering.
 - `last_seen_at` is the server time of the last new event. Duplicates and invalid events don't change it.
-- Users are managed by another system (e.g. a user or employee service). The service checks only that `user_id` is a positive integer, stores it as received, and doesn't reject an event because the user is unknown.
-- Heartbeat values are stored as sent, with no range check, so a heartbeat is never rejected because of an odd reading.
+- Users are managed by another system. `user_id` is only checked to be a positive integer; unknown users aren't rejected.
+- Heartbeat values have no range check, so an odd reading never rejects a heartbeat.
 - Unknown payload fields are dropped.
 
 ## Where I used AI tools
 
 I used Claude Code for these parts:
 
-- The tests, including the `X-Device-Token` guard tests, the Postgres connection e2e test, and the shared `createApp()` helper (`test/create-app.ts`) that starts the app for the e2e tests.
+- The tests and the `createApp()` e2e helper (`test/create-app.ts`).
 - The `Database` class that connects to Postgres.
-- The DTO validation and the dedupe in the ingest transaction: I wrote the first version, and Claude Code extended both.
-- Reviewing and formatting this README, and writing parts of it: the API reference and the setup and test notes.
+- DTO validation and dedupe: I wrote the first version, and Claude Code extended both.
+- The global exception filter: I wrote it, and Claude Code fixed how it reports validation errors and registered it.
+- Reviewing this README and writing the API reference and the setup and test notes.
