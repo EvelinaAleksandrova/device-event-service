@@ -4,7 +4,7 @@ import { App } from 'supertest/types';
 import { Database } from './../src/database/database';
 import { createApp } from './create-app';
 
-describe('AppController (e2e)', () => {
+describe('Health (e2e)', () => {
   let app: INestApplication<App>;
 
   beforeEach(async () => {
