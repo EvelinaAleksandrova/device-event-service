@@ -16,18 +16,18 @@ describe('X-Device-Token (e2e)', () => {
 
   it('lets a request with the right X-Device-Token through', () => {
     return request(app.getHttpServer())
-      .get('/')
+      .get('/devices')
       .set('X-Device-Token', DEVICE_TOKEN)
       .expect(200);
   });
 
   it('rejects a request without X-Device-Token', () => {
-    return request(app.getHttpServer()).get('/').expect(401);
+    return request(app.getHttpServer()).get('/devices').expect(401);
   });
 
   it('rejects a request with a wrong X-Device-Token', () => {
     return request(app.getHttpServer())
-      .get('/')
+      .get('/devices')
       .set('X-Device-Token', 'wrong-token')
       .expect(401);
   });

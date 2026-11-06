@@ -36,7 +36,54 @@ The e2e tests empty the `devices` and `device_events` tables before each test. B
 
 ## API
 
-Every request needs the `X-Device-Token` header set to `DEVICE_TOKEN`; otherwise the answer is 401.
+Every request to `/devices` needs the `X-Device-Token` header set to `DEVICE_TOKEN`; otherwise the answer is 401. The health endpoints and `/metrics` need no token.
+
+### GET /health and GET /health/ready
+
+`/health` (liveness) answers as long as the process runs; it doesn't touch the database. `/health/ready` (readiness) also checks that Postgres answers `SELECT 1`.
+
+```bash
+curl -i http://localhost:3000/health
+curl -i http://localhost:3000/health/ready
+```
+
+`/health` answers with the plain text `ok`; `/health/ready` with:
+
+```json
+{ "status": "ok" }
+```
+
+| Endpoint        | 200                | 503                                                                      |
+| --------------- | ------------------ | ------------------------------------------------------------------------ |
+| `/health`       | The process is up. | Never.                                                                   |
+| `/health/ready` | Postgres answers.  | Postgres is down: `{ "error": true, "message": "Database unavailable" }` |
+
+The 503 case is covered by an e2e test (`test/health-db-down.e2e-spec.ts`) that points the app at a port where nothing listens, so the connection is refused as when Postgres is stopped.
+
+### GET /metrics
+
+Prometheus metrics in the text format, made with `prom-client`.
+
+Send the example from `POST /devices/{id}/events` twice: the first is created (201), the second is a duplicate (200). Then:
+
+```bash
+curl -s http://localhost:3000/metrics | grep -E "^(events_ingested_total|http_request_duration_seconds_count)"
+```
+
+```text
+events_ingested_total{result="created",type="sensor_opened"} 1
+events_ingested_total{result="duplicate",type="sensor_opened"} 1
+http_request_duration_seconds_count{method="POST",route="/devices/:id/events",status_code="201"} 1
+http_request_duration_seconds_count{method="POST",route="/devices/:id/events",status_code="200"} 1
+```
+
+| Metric                          | Type      | Labels                                   | What it shows                                                                         |
+| ------------------------------- | --------- | ---------------------------------------- | ------------------------------------------------------------------------------------- |
+| `events_ingested_total`         | Counter   | `result` (`created`/`duplicate`), `type` | Events received; `result="duplicate"` counts retries of an `event_id` already stored. |
+| `http_request_duration_seconds` | Histogram | `method`, `route`, `status_code`         | Request latency, with the default buckets. `/metrics` itself isn't recorded.          |
+| Node.js defaults                | various   | various                                     | CPU, memory, event-loop lag and GC, from `collectDefaultMetrics()`.                   |
+
+`route` is the pattern, such as `/devices/:id/events`, never a device id, so the number of series stays fixed. The counters start from zero when the service restarts.
 
 ### POST /devices/{id}/events
 
@@ -228,6 +275,7 @@ Every error, on any route, has the same body:
 | 404    | Unknown device.                        | e.g. `Device panel-0042 not found`                           |
 | 404    | Unknown route.                         | e.g. `Cannot GET /no-such-route`                             |
 | 500    | Unexpected error in the service.       | Always `Internal server error`. The details are only logged. |
+| 503    | `/health/ready` can't reach Postgres.  | `Database unavailable`                                       |
 
 ## Design decisions
 
@@ -238,6 +286,8 @@ Every error, on any route, has the same body:
 - **Row lock per device.** Each event is saved in one transaction that locks the device row, so concurrent events can't overwrite each other. Events for the same device wait for each other, but different devices still run in parallel.
 - **Current state in `devices`.** The `devices` table holds each device's current state, updated by every new event. Reads are fast because nothing is rebuilt from the history, but the state and the history must be updated in the same transaction.
 - **One error shape.** A global exception filter returns every error as `{ error, message }`.
+- **Separate liveness and readiness.** If Postgres goes down, restarting the service doesn't help. So `/health` doesn't check the database and the platform won't restart the service in a loop; `/health/ready` does, so traffic stops until the database is back.
+- **Token guard per controller.** The guard is on `DevicesController` instead of global, so `/health` and `/metrics` stay open for the platform and monitoring, which don't send a device token. A new controller is open until it adds `@UseGuards(DeviceTokenGuard)`.
 
 ### History pagination
 
@@ -298,10 +348,37 @@ I used Claude Code for these parts:
 - `docker-compose.yml`: I wrote the Postgres service, and Claude Code added the `app` service that waits for Postgres and connects to it by service name.
 - The history API: I chose cursor pagination; Claude Code proposed the `seq` cursor read in SQL and wrote the endpoint, the query DTO and the tests, and I reviewed them.
 - Pagination for `GET /devices`: I decided to paginate it by default; Claude Code wrote the code and tests, and I reviewed them.
+- The health endpoints: I wrote the foundation, `/health` and `/health/ready` with the 503 when Postgres is down, and I moved the token guard from global to `DevicesController`. Claude Code fixed the tests that broke, fixed a type error, suggested the `checkLiveness`/`checkReadiness` names, and wrote the e2e test for the 503 case.
+- Metrics (Observe it): I chose `prom-client` and the scope: an ingest counter split into created and duplicate, a latency histogram and the default Node.js metrics. Claude Code wrote the metrics module, the latency interceptor and the tests.
 
 ## Extension: History API
 
 I chose the History API because pagination is something I work with every day. At work we mainly use offset-style pagination (offset or page number), because our users move between numbered pages. This task is a different case: clients only walk forward through `next`, and the history grows with every heartbeat. So I chose keyset (cursor) pagination here, and the "History pagination" section explains why.
+
+## Extension: Observe it
+
+I chose this extension because it is close to my daily work. On the backend we track slow requests and failed calls to external APIs with their errors, and we send statistics to the admin panels.
+
+Here I used `prom-client`, the usual Prometheus library for Node.js. The metrics show how many events arrive, how many are duplicates, and how fast the service answers. The alarm and the runbook below say what to do when something goes wrong.
+
+### Alarm
+
+**No events for 5 minutes.** Every panel sends a heartbeat each minute, so in normal work events never stop. If none arrive for 5 minutes, something is broken: the devices can't reach the service, or the service can't save events. The counter only goes up after the event is committed, so a database outage stops it too. Users would see every panel as offline at the same time, after `OFFLINE_AFTER_SECONDS` (default 300).
+
+### Runbook
+
+**What pages you:** the alarm above, no events for 5 minutes.
+
+**First three steps:**
+
+1. **Database:** `GET /health/ready`. 503 means Postgres is down; no answer means the service is down.
+2. **Logs:** `docker compose logs --tail 100 app`. Look for 500s and database connection errors.
+3. **Devices:** `GET /devices?status=offline`, then `GET /devices/{id}/events` for their last heartbeats (`battery_pct`, `rssi_dbm`). All silent at once with good battery and signal: the problem is ours or the network's. Only a few, with low battery or weak signal: the problem is those devices.
+
+## Unfinished, and what I'd do with more time
+
+- **See rejected requests.** Requests with a wrong `X-Device-Token` (401) are not logged and not in the metrics, because the token guard runs before the metrics interceptor. If devices had a wrong token, it would look like "no events". I would count them in the guard.
+- **More metrics.** The number of offline devices and the delay between `occurred_at` and arrival, to see devices that send late.
 
 ## What would change at 10x scale
 
