@@ -14,6 +14,7 @@ import { ConfigService } from '@nestjs/config';
 import { onlineCutoff, statusAt } from './device-status';
 import { DeviceStatus } from './enums/device-status.enum';
 import { Clock } from '../shared/clock';
+import { MetricsService } from '../metrics/metrics.service';
 
 export interface EventPage {
   events: HistoryEvent[];
@@ -34,6 +35,7 @@ export class DevicesService {
   constructor(
     private readonly db: Database,
     private readonly clock: Clock,
+    private readonly metricsService: MetricsService,
     configService: ConfigService,
   ) {
     const seconds = Number(
@@ -82,6 +84,7 @@ export class DevicesService {
           [id, dto.event_id],
         );
         await client.query('COMMIT');
+        this.metricsService.recordEventIngested(dto.type, false);
         return { created: false, event: existing.rows[0] };
       }
 
@@ -94,6 +97,7 @@ export class DevicesService {
         [id, now, next.arm_state, next.arm_mode, next.open_sensors],
       );
       await client.query('COMMIT');
+      this.metricsService.recordEventIngested(dto.type, true);
       return { created: true, event: event.rows[0] };
     } catch (err) {
       await client.query('ROLLBACK');
