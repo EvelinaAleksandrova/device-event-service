@@ -62,10 +62,20 @@ describe('GET /devices (e2e)', () => {
       .set('X-Device-Token', DEVICE_TOKEN);
   }
 
-  function listDevices(query: string) {
+  function get(url: string) {
     return request(app.getHttpServer())
-      .get(`/devices${query}`)
+      .get(url)
       .set('X-Device-Token', DEVICE_TOKEN);
+  }
+
+  function listDevices(query: string) {
+    return get(`/devices${query}`);
+  }
+
+  function deviceIds(response: request.Response): string[] {
+    return response.body.devices.map(
+      (device: { device_id: string }) => device.device_id,
+    );
   }
 
   function postAt(isoTime: string, body: object, deviceId = DEVICE_ID) {
@@ -107,6 +117,7 @@ describe('GET /devices (e2e)', () => {
           last_seen_at: '2026-09-29T14:02:00Z',
         },
       ],
+      next: null,
     });
 
     await postAt('2026-09-29T14:08:00Z', heartbeat()).expect(201);
@@ -200,6 +211,7 @@ describe('GET /devices (e2e)', () => {
             last_seen_at: '2026-09-29T14:02:00Z',
           },
         ],
+        next: null,
       });
     });
 
@@ -215,6 +227,7 @@ describe('GET /devices (e2e)', () => {
             last_seen_at: '2026-09-29T14:00:00Z',
           },
         ],
+        next: null,
       });
     });
 
@@ -252,6 +265,7 @@ describe('GET /devices (e2e)', () => {
             last_seen_at: '2026-09-29T14:02:00Z',
           },
         ],
+        next: null,
       });
     });
 
@@ -261,7 +275,114 @@ describe('GET /devices (e2e)', () => {
       const response = await listDevices('?status=online');
 
       expect(response.status).toBe(200);
-      expect(response.body).toEqual({ devices: [] });
+      expect(response.body).toEqual({ devices: [], next: null });
+    });
+
+    it('walks every device page by page, ending with next: null', async () => {
+      const firstPage = await listDevices('?limit=2').expect(200);
+
+      expect(deviceIds(firstPage)).toEqual(['panel-a', 'panel-b']);
+      expect(firstPage.body.next).toBe('/devices?limit=2&cursor=panel-b');
+
+      const lastPage = await get(firstPage.body.next as string).expect(200);
+
+      expect(deviceIds(lastPage)).toEqual(['panel-c']);
+      expect(lastPage.body.next).toBeNull();
+    });
+
+    it('keeps the status filter on the next page', async () => {
+      const firstPage = await listDevices('?status=online&limit=1').expect(200);
+
+      expect(deviceIds(firstPage)).toEqual(['panel-a']);
+      expect(firstPage.body.next).toBe(
+        '/devices?status=online&limit=1&cursor=panel-a',
+      );
+
+      // panel-b is next by id but offline, so the page skips it.
+      const lastPage = await get(firstPage.body.next as string).expect(200);
+
+      expect(deviceIds(lastPage)).toEqual(['panel-c']);
+      expect(lastPage.body.next).toBeNull();
+    });
+
+    it('returns next: null when the last page is exactly full', async () => {
+      const response = await listDevices('?limit=3').expect(200);
+
+      expect(deviceIds(response)).toEqual(['panel-a', 'panel-b', 'panel-c']);
+      expect(response.body.next).toBeNull();
+    });
+
+    it('lists a device at most once while statuses change between pages', async () => {
+      const firstPage = await listDevices('?status=online&limit=1').expect(200);
+      expect(deviceIds(firstPage)).toEqual(['panel-a']);
+
+      // panel-a reports again and panel-b comes back online; at 14:07:00.001
+      // panel-c, last seen 14:02:00, goes offline.
+      await postAt('2026-09-29T14:07:00.001Z', heartbeat(), 'panel-a').expect(
+        201,
+      );
+      await postAt('2026-09-29T14:07:00.001Z', heartbeat(), 'panel-b').expect(
+        201,
+      );
+
+      const lastPage = await get(firstPage.body.next as string).expect(200);
+
+      expect(deviceIds(lastPage)).toEqual(['panel-b']);
+      expect(lastPage.body.next).toBeNull();
+    });
+
+    it('starts after a cursor that is not a device id', async () => {
+      const response = await listDevices('?cursor=panel-aa').expect(200);
+
+      expect(deviceIds(response)).toEqual(['panel-b', 'panel-c']);
+    });
+
+    it('round-trips a device id with URL characters as the cursor', async () => {
+      // Digits sort before letters, so this device is first on the list.
+      const deviceId = '0 a&b+c';
+      await postAt(
+        '2026-09-29T14:06:00Z',
+        heartbeat(),
+        encodeURIComponent(deviceId),
+      ).expect(201);
+
+      const firstPage = await listDevices('?limit=1').expect(200);
+
+      expect(deviceIds(firstPage)).toEqual([deviceId]);
+      expect(firstPage.body.next).toBe('/devices?limit=1&cursor=0+a%26b%2Bc');
+
+      const secondPage = await get(firstPage.body.next as string).expect(200);
+
+      expect(deviceIds(secondPage)).toEqual(['panel-a']);
+    });
+
+    it.each([
+      ['an empty cursor', '?cursor='],
+      ['a repeated cursor', '?cursor=panel-a&cursor=panel-b'],
+    ])('rejects %s with 400', async (_case, query) => {
+      const response = await listDevices(query);
+
+      expect(response.status).toBe(400);
+      expect(response.body).toEqual({
+        error: true,
+        message: 'cursor is invalid',
+      });
+    });
+
+    it.each([
+      ['a zero limit', '?limit=0'],
+      ['a limit over 500', '?limit=501'],
+      ['a non-numeric limit', '?limit=abc'],
+      ['a limit in exponent form', '?limit=1e2'],
+      ['a repeated limit', '?limit=1&limit=2'],
+    ])('rejects %s with 400', async (_case, query) => {
+      const response = await listDevices(query);
+
+      expect(response.status).toBe(400);
+      expect(response.body).toEqual({
+        error: true,
+        message: 'limit must be an integer from 1 to 500',
+      });
     });
 
     it.each([

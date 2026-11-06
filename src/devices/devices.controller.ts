@@ -11,7 +11,10 @@ import {
 import { DevicesService } from './devices.service';
 import { DeviceEventDto } from './dto/device-event.dto';
 import { DeviceEventResponseDto } from './dto/device-event-response.dto';
-import { DeviceListResponseDto } from './dto/device-list-response.dto';
+import {
+  DeviceListResponseDto,
+  nextDeviceListUrl,
+} from './dto/device-list-response.dto';
 import { DeviceResponseDto } from './dto/device-response.dto';
 import {
   EventHistoryQueryDto,
@@ -21,7 +24,10 @@ import {
   EventHistoryResponseDto,
   nextPageUrl,
 } from './dto/event-history-response.dto';
-import { ListDevicesQueryDto } from './dto/list-devices-query.dto';
+import {
+  ListDevicesQueryDto,
+  toListDevicesQuery,
+} from './dto/list-devices-query.dto';
 import type { Response } from 'express';
 
 @Controller('devices')
@@ -56,11 +62,15 @@ export class DevicesController {
   }
 
   @Get()
-  async findAll(
-    @Query() query: ListDevicesQueryDto,
+  async findAllByStatus(
+    @Query() queryDto: ListDevicesQueryDto,
   ): Promise<DeviceListResponseDto> {
-    const devices = await this.devicesService.findAll(query.status);
-    return new DeviceListResponseDto(devices);
+    const query = toListDevicesQuery(queryDto);
+    const page = await this.devicesService.findAllByStatus(query);
+    return new DeviceListResponseDto(
+      page.devices,
+      nextDeviceListUrl(query.status, query.limit, page.nextCursor),
+    );
   }
 
   @Get(':id')

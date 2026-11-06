@@ -111,24 +111,31 @@ curl -i http://localhost:3000/devices/panel-0042 -H "X-Device-Token: dev-shared-
 | 401    | Missing or wrong `X-Device-Token`.       |
 | 404    | The device has never sent a valid event. |
 
-### GET /devices[?status={online|offline}]
+### GET /devices[?status={online|offline}&limit=]
 
-Lists the devices, sorted by `device_id`. The `status` query parameter is optional. A device is `offline` once more than `OFFLINE_AFTER_SECONDS` (default 300) have passed since its `last_seen_at`, and `online` otherwise, the same as in `GET /devices/{id}`. No match returns `{ "devices": [] }`.
+Lists the devices, sorted by `device_id`, one page at a time. The `status` query parameter is optional. A device is `offline` once more than `OFFLINE_AFTER_SECONDS` (default 300) have passed since its `last_seen_at`, and `online` otherwise, the same as in `GET /devices/{id}`. Follow `next` until it is `null` to walk the full list. No match returns `{ "devices": [], "next": null }`.
 
-| Request                       | Result                                                     |
-| ----------------------------- | ---------------------------------------------------------- |
-| `GET /devices`                | All devices, online and offline, each with its own status. |
-| `GET /devices?status=online`  | Only online devices.                                       |
-| `GET /devices?status=offline` | Only offline devices.                                      |
-| `GET /devices?status=foo`     | 400 with an error listing the allowed values.              |
+| Parameter | Rule                                                                                                  |
+| --------- | ----------------------------------------------------------------------------------------------------- |
+| `status`  | Optional. `online` or `offline`.                                                                      |
+| `limit`   | Optional. Integer from 1 to 500, default 50, the same rule as in the history API.                     |
+| `cursor`  | Set by the service in `next`; clients don't build it. The id of the last device on the previous page. |
+
+| Request                       | Result                                                                   |
+| ----------------------------- | ------------------------------------------------------------------------ |
+| `GET /devices`                | First page of all devices, online and offline, each with its own status. |
+| `GET /devices?status=online`  | Only online devices.                                                     |
+| `GET /devices?status=offline` | Only offline devices.                                                    |
+| `GET /devices?status=foo`     | 400 with an error listing the allowed values.                            |
 
 ```bash
 curl -i http://localhost:3000/devices -H "X-Device-Token: dev-shared-token"
 curl -i "http://localhost:3000/devices?status=online" -H "X-Device-Token: dev-shared-token"
-curl -i "http://localhost:3000/devices?status=offline" -H "X-Device-Token: dev-shared-token"
+curl -i "http://localhost:3000/devices?status=offline&limit=1" -H "X-Device-Token: dev-shared-token"
+curl -i "http://localhost:3000<next>" -H "X-Device-Token: dev-shared-token"
 ```
 
-`GET /devices?status=offline` returns:
+`GET /devices?status=offline&limit=1` returns:
 
 ```json
 {
@@ -138,15 +145,18 @@ curl -i "http://localhost:3000/devices?status=offline" -H "X-Device-Token: dev-s
       "status": "offline",
       "last_seen_at": "2026-09-29T14:02:00Z"
     }
-  ]
+  ],
+  "next": "/devices?status=offline&limit=1&cursor=panel-0042"
 }
 ```
 
-| Status | When                                                      |
-| ------ | --------------------------------------------------------- |
-| 200    | A valid or missing `status`, even when no device matches. |
-| 400    | `status` is empty, repeated, or not `online`/`offline`.   |
-| 401    | Missing or wrong `X-Device-Token`.                        |
+As in the history API, `next` is `null` on the last page, even when it holds exactly `limit` devices.
+
+| Status | When                                                                                                 |
+| ------ | ---------------------------------------------------------------------------------------------------- |
+| 200    | Valid or missing parameters, even when no device matches.                                            |
+| 400    | `status` is empty, repeated, or not `online`/`offline`; invalid `limit`; empty or repeated `cursor`. |
+| 401    | Missing or wrong `X-Device-Token`.                                                                   |
 
 An unknown `status` returns:
 
@@ -245,6 +255,18 @@ Every error, on any route, has the same body:
 - Two queries per page: one checks the device and cursor (404/400), then the page query.
 - `seq` is global, so cursors reveal roughly how many events are stored.
 
+### Device list pagination
+
+- **Same contract as the history API:** `limit` (default 50, max 500), `limit + 1` rows fetched, and a relative `next` URL that is `null` on the last page.
+- **The cursor is the last `device_id`.** `id` is the primary key, so `WHERE id > $cursor ORDER BY id` uses its index and needs no lookup. Unlike the history API, any non-empty cursor is a valid position, so only an empty or repeated cursor is a 400.
+- **`next` repeats `status`**, or the next page would stop being filtered.
+- **No index on `last_seen_at`**, because every event updates it, including a heartbeat from every device every minute. An index would have to be updated on every one of these writes, which would slow down the most frequent operation.
+
+**Tradeoffs**
+
+- Status is computed per page, at that request's time. A device that changes status during a walk can be missing from it, but it is never listed twice, because the list is sorted by `id`, which doesn't change.
+- No total count: `count(*)` over millions of devices would be expensive on every page.
+
 ## Assumptions
 
 - The device id is any string. A device is created by its first event; there is no registration step.
@@ -257,7 +279,8 @@ Every error, on any route, has the same body:
 - Heartbeat values have no range check, so an odd reading never rejects a heartbeat.
 - Unknown payload fields are dropped.
 - Status is computed when the device is read, not stored, so it is never stale. A device turns offline only once more than `OFFLINE_AFTER_SECONDS` (default 300) have passed since `last_seen_at`; at exactly `OFFLINE_AFTER_SECONDS` it is still online.
-- The spec makes only an unknown status filter a 400, so `GET /devices` without `status` lists every device. An empty or repeated `status` counts as unknown.
+- The spec makes only an unknown status filter a 400, so `GET /devices` without `status` lists devices of every status. An empty or repeated `status` counts as unknown.
+- `GET /devices` is paginated (`limit` 50 by default, cursor in `next`), although the spec doesn't ask for it. The device list grows without bound, and at 10M devices returning everything in one response isn't an option. This changes the empty result from `{ "devices": [] }` to `{ "devices": [], "next": null }`.
 
 ## Where I used AI tools
 
@@ -274,6 +297,7 @@ I used Claude Code for these parts:
 - The Dockerfile: I wrote the first version, and Claude Code turned it into a multi-stage Alpine build that ships only production dependencies.
 - `docker-compose.yml`: I wrote the Postgres service, and Claude Code added the `app` service that waits for Postgres and connects to it by service name.
 - The history API: I chose cursor pagination; Claude Code proposed the `seq` cursor read in SQL and wrote the endpoint, the query DTO and the tests, and I reviewed them.
+- Pagination for `GET /devices`: I decided to paginate it by default; Claude Code wrote the code and tests, and I reviewed them.
 
 ## Extension: History API
 
