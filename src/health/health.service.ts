@@ -1,8 +1,8 @@
 import { Injectable, ServiceUnavailableException } from '@nestjs/common';
-import { Database } from './database/database';
+import { Database } from '../database/database';
 
 @Injectable()
-export class AppService {
+export class HealthService {
   constructor(private readonly db: Database) {}
 
   checkLiveness(): string {
