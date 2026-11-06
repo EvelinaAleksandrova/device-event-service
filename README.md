@@ -166,7 +166,7 @@ Returns the device's event history, oldest first by `occurred_at`. Events with t
 
 ```bash
 curl -i "http://localhost:3000/devices/panel-0042/events?since=2026-09-29T13:00:00Z&limit=2" -H "X-Device-Token: dev-shared-token"
-curl -i "http://localhost:3000/devices/panel-0042/events?limit=2&cursor=17" -H "X-Device-Token: dev-shared-token"
+curl -i "http://localhost:3000<next>" -H "X-Device-Token: dev-shared-token"
 ```
 
 ```json
@@ -189,7 +189,9 @@ curl -i "http://localhost:3000/devices/panel-0042/events?limit=2&cursor=17" -H "
 }
 ```
 
-`next` is `null` on the last page. A device that exists but has no events at or after `since` returns `{ "events": [], "next": null }`.
+The cursor is a database-wide sequence number assigned when an event is stored, so `17` is only an example. Take the value from `next`.
+
+`next` has a value only when more than `limit` events are left to return. Otherwise the page is the last one and `next` is `null`, even if it holds exactly `limit` events. A device that exists but has no events at or after `since` returns `{ "events": [], "next": null }`.
 
 | Status | When                                                            |
 | ------ | --------------------------------------------------------------- |
@@ -219,12 +221,12 @@ Every error, on any route, has the same body:
 
 ## Design decisions
 
-- **NestJS**: I use it every day. Its guards, `ValidationPipe` and dependency injection cover the token check, input validation and the injectable `Clock` without extra libraries.
-- **Postgres**: The ingest endpoint relies on its transactions and `SELECT ... FOR UPDATE` to apply concurrent events correctly, and it supports partitioning for the 10x case.
-- **Plain `pg`, no ORM**: for clear code. Every query is visible SQL, including `ON CONFLICT` for the dedupe and the row comparison behind the history cursor.
+- **NestJS.** I use it every day. Its guards, `ValidationPipe` and dependency injection cover the token check, input validation and the injectable `Clock` without extra libraries. Its module structure makes the service easy to extend with new features. Compared with plain Node.js, where routing, body parsing and validation would be written by hand, the cost is more dependencies and boilerplate.
+- **Postgres.** The ingest endpoint relies on its transactions and `SELECT ... FOR UPDATE` to apply concurrent events correctly, and it supports partitioning for the 10x case.
+- **Plain `pg`, no ORM.** Every query is visible and clear SQL, including `ON CONFLICT` for the dedupe and the row comparison behind the history cursor.
 - **Dedupe in the database.** `(device_id, event_id)` is the primary key and the insert uses `ON CONFLICT DO NOTHING`, so even a simultaneous retry is stored once.
-- Each event is saved in one transaction that locks the device row, so concurrent events can't overwrite each other.
-- The `devices` table holds each device's current state, updated by every new event.
+- **Row lock per device.** Each event is saved in one transaction that locks the device row, so concurrent events can't overwrite each other. Events for the same device wait for each other, but different devices still run in parallel.
+- **Current state in `devices`.** The `devices` table holds each device's current state, updated by every new event. Reads are fast because nothing is rebuilt from the history, but the state and the history must be updated in the same transaction.
 - **One error shape.** A global exception filter returns every error as `{ error, message }`.
 
 ### History pagination
@@ -280,4 +282,4 @@ I chose the History API because pagination is something I work with every day. A
 ## What would change at 10x scale
 
 - **Retention.** Heartbeats are most of the rows (one per device per minute), only matter for recent history and don't affect device state, so they can be deleted after a few days. Other events are deleted after a set period, for example 3 to 12 months. A client paging through history that has been deleted gets `cursor is invalid`.
-- **Partition `device_events` by `occurred_at`.** Retention then drops whole old partitions instead of running large `DELETE`s, which are slow and leave dead rows for vacuum. The tradeoff: Postgres requires the partition column in the primary key, so the dedupe key becomes `(device_id, event_id, occurred_at)`. A resent event keeps its `occurred_at`, so it is still caught; `received_at` would not work, since a retry arrives at a new server time.
+- **Partition `device_events` by `occurred_at`.** Retention then drops whole old partitions instead of running large `DELETE`s, which are slow and leave dead rows for vacuum. Postgres requires the partition column in the primary key, so the key becomes `(device_id, event_id, occurred_at)`. The task defines a duplicate by `event_id` alone, so a retry with a different `occurred_at` would no longer be caught. To keep that rule, dedupe in a separate unpartitioned table keyed on `(device_id, event_id)`, inserted in the same transaction. `received_at` would not work as the partition key, since a retry arrives at a new server time.
