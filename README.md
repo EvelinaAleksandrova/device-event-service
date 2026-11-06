@@ -81,7 +81,7 @@ http_request_duration_seconds_count{method="POST",route="/devices/:id/events",st
 | ------------------------------- | --------- | ---------------------------------------- | ------------------------------------------------------------------------------------- |
 | `events_ingested_total`         | Counter   | `result` (`created`/`duplicate`), `type` | Events received; `result="duplicate"` counts retries of an `event_id` already stored. |
 | `http_request_duration_seconds` | Histogram | `method`, `route`, `status_code`         | Request latency, with the default buckets. `/metrics` itself isn't recorded.          |
-| Node.js defaults                | various   | none                                     | CPU, memory, event-loop lag and GC, from `collectDefaultMetrics()`.                   |
+| Node.js defaults                | various   | various                                     | CPU, memory, event-loop lag and GC, from `collectDefaultMetrics()`.                   |
 
 `route` is the pattern, such as `/devices/:id/events`, never a device id, so the number of series stays fixed. The counters start from zero when the service restarts.
 
