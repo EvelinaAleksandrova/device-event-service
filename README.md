@@ -36,7 +36,29 @@ The e2e tests empty the `devices` and `device_events` tables before each test. B
 
 ## API
 
-Every request needs the `X-Device-Token` header set to `DEVICE_TOKEN`; otherwise the answer is 401.
+Every request to `/devices` needs the `X-Device-Token` header set to `DEVICE_TOKEN`; otherwise the answer is 401. The health endpoints need no token.
+
+### GET /health and GET /health/ready
+
+`/health` (liveness) answers as long as the process runs; it doesn't touch the database. `/health/ready` (readiness) also checks that Postgres answers `SELECT 1`.
+
+```bash
+curl -i http://localhost:3000/health
+curl -i http://localhost:3000/health/ready
+```
+
+`/health` answers with the plain text `ok`; `/health/ready` with:
+
+```json
+{ "status": "ok" }
+```
+
+| Endpoint        | 200                | 503                                                                      |
+| --------------- | ------------------ | ------------------------------------------------------------------------ |
+| `/health`       | The process is up. | Never.                                                                   |
+| `/health/ready` | Postgres answers.  | Postgres is down: `{ "error": true, "message": "Database unavailable" }` |
+
+The 503 case is covered by an e2e test (`test/health-db-down.e2e-spec.ts`) that points the app at a port where nothing listens, so the connection is refused as when Postgres is stopped.
 
 ### POST /devices/{id}/events
 
@@ -228,6 +250,7 @@ Every error, on any route, has the same body:
 | 404    | Unknown device.                        | e.g. `Device panel-0042 not found`                           |
 | 404    | Unknown route.                         | e.g. `Cannot GET /no-such-route`                             |
 | 500    | Unexpected error in the service.       | Always `Internal server error`. The details are only logged. |
+| 503    | `/health/ready` can't reach Postgres.  | `Database unavailable`                                       |
 
 ## Design decisions
 
@@ -238,6 +261,8 @@ Every error, on any route, has the same body:
 - **Row lock per device.** Each event is saved in one transaction that locks the device row, so concurrent events can't overwrite each other. Events for the same device wait for each other, but different devices still run in parallel.
 - **Current state in `devices`.** The `devices` table holds each device's current state, updated by every new event. Reads are fast because nothing is rebuilt from the history, but the state and the history must be updated in the same transaction.
 - **One error shape.** A global exception filter returns every error as `{ error, message }`.
+- **Separate liveness and readiness.** If Postgres goes down, restarting the service doesn't help. So `/health` doesn't check the database and the platform won't restart the service in a loop; `/health/ready` does, so traffic stops until the database is back.
+- **Token guard per controller.** The guard is on `DevicesController` instead of global, so `/health` stay open for the platform and monitoring, which don't send a device token. A new controller is open until it adds `@UseGuards(DeviceTokenGuard)`.
 
 ### History pagination
 
@@ -298,6 +323,7 @@ I used Claude Code for these parts:
 - `docker-compose.yml`: I wrote the Postgres service, and Claude Code added the `app` service that waits for Postgres and connects to it by service name.
 - The history API: I chose cursor pagination; Claude Code proposed the `seq` cursor read in SQL and wrote the endpoint, the query DTO and the tests, and I reviewed them.
 - Pagination for `GET /devices`: I decided to paginate it by default; Claude Code wrote the code and tests, and I reviewed them.
+- The health endpoints: I wrote the foundation, `/health` and `/health/ready` with the 503 when Postgres is down, and I moved the token guard from global to `DevicesController`. Claude Code fixed the tests that broke, fixed a type error, suggested the `checkLiveness`/`checkReadiness` names, and wrote the e2e test for the 503 case.
 
 ## Extension: History API
 

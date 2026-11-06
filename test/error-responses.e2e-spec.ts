@@ -15,7 +15,7 @@ describe('Error responses (e2e)', () => {
   });
 
   it('answers a missing X-Device-Token with 401 and the error body', async () => {
-    const response = await request(app.getHttpServer()).get('/');
+    const response = await request(app.getHttpServer()).get('/devices');
 
     expect(response.status).toBe(401);
     expect(response.body).toEqual({

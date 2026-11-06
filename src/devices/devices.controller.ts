@@ -7,6 +7,7 @@ import {
   Post,
   Query,
   Res,
+  UseGuards,
 } from '@nestjs/common';
 import { DevicesService } from './devices.service';
 import { DeviceEventDto } from './dto/device-event.dto';
@@ -29,7 +30,9 @@ import {
   toListDevicesQuery,
 } from './dto/list-devices-query.dto';
 import type { Response } from 'express';
+import { DeviceTokenGuard } from '../auth/device-token.guard';
 
+@UseGuards(DeviceTokenGuard)
 @Controller('devices')
 export class DevicesController {
   constructor(private readonly devicesService: DevicesService) {}
