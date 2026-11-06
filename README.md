@@ -111,24 +111,31 @@ curl -i http://localhost:3000/devices/panel-0042 -H "X-Device-Token: dev-shared-
 | 401    | Missing or wrong `X-Device-Token`.       |
 | 404    | The device has never sent a valid event. |
 
-### GET /devices[?status={online|offline}]
+### GET /devices[?status={online|offline}&limit=]
 
-Lists the devices, sorted by `device_id`. The `status` query parameter is optional. A device is `offline` once more than `OFFLINE_AFTER_SECONDS` (default 300) have passed since its `last_seen_at`, and `online` otherwise, the same as in `GET /devices/{id}`. No match returns `{ "devices": [] }`.
+Lists the devices, sorted by `device_id`, one page at a time. The `status` query parameter is optional. A device is `offline` once more than `OFFLINE_AFTER_SECONDS` (default 300) have passed since its `last_seen_at`, and `online` otherwise, the same as in `GET /devices/{id}`. Follow `next` until it is `null` to walk the full list. No match returns `{ "devices": [], "next": null }`.
 
-| Request                       | Result                                                     |
-| ----------------------------- | ---------------------------------------------------------- |
-| `GET /devices`                | All devices, online and offline, each with its own status. |
-| `GET /devices?status=online`  | Only online devices.                                       |
-| `GET /devices?status=offline` | Only offline devices.                                      |
-| `GET /devices?status=foo`     | 400 with an error listing the allowed values.              |
+| Parameter | Rule                                                                                                  |
+| --------- | ----------------------------------------------------------------------------------------------------- |
+| `status`  | Optional. `online` or `offline`.                                                                      |
+| `limit`   | Optional. Integer from 1 to 500, default 50, the same rule as in the history API.                     |
+| `cursor`  | Set by the service in `next`; clients don't build it. The id of the last device on the previous page. |
+
+| Request                       | Result                                                                   |
+| ----------------------------- | ------------------------------------------------------------------------ |
+| `GET /devices`                | First page of all devices, online and offline, each with its own status. |
+| `GET /devices?status=online`  | Only online devices.                                                     |
+| `GET /devices?status=offline` | Only offline devices.                                                    |
+| `GET /devices?status=foo`     | 400 with an error listing the allowed values.                            |
 
 ```bash
 curl -i http://localhost:3000/devices -H "X-Device-Token: dev-shared-token"
 curl -i "http://localhost:3000/devices?status=online" -H "X-Device-Token: dev-shared-token"
-curl -i "http://localhost:3000/devices?status=offline" -H "X-Device-Token: dev-shared-token"
+curl -i "http://localhost:3000/devices?status=offline&limit=1" -H "X-Device-Token: dev-shared-token"
+curl -i "http://localhost:3000<next>" -H "X-Device-Token: dev-shared-token"
 ```
 
-`GET /devices?status=offline` returns:
+`GET /devices?status=offline&limit=1` returns:
 
 ```json
 {
@@ -138,15 +145,18 @@ curl -i "http://localhost:3000/devices?status=offline" -H "X-Device-Token: dev-s
       "status": "offline",
       "last_seen_at": "2026-09-29T14:02:00Z"
     }
-  ]
+  ],
+  "next": "/devices?status=offline&limit=1&cursor=panel-0042"
 }
 ```
 
-| Status | When                                                      |
-| ------ | --------------------------------------------------------- |
-| 200    | A valid or missing `status`, even when no device matches. |
-| 400    | `status` is empty, repeated, or not `online`/`offline`.   |
-| 401    | Missing or wrong `X-Device-Token`.                        |
+As in the history API, `next` is `null` on the last page, even when it holds exactly `limit` devices.
+
+| Status | When                                                                                                 |
+| ------ | ---------------------------------------------------------------------------------------------------- |
+| 200    | Valid or missing parameters, even when no device matches.                                            |
+| 400    | `status` is empty, repeated, or not `online`/`offline`; invalid `limit`; empty or repeated `cursor`. |
+| 401    | Missing or wrong `X-Device-Token`.                                                                   |
 
 An unknown `status` returns:
 
@@ -166,7 +176,7 @@ Returns the device's event history, oldest first by `occurred_at`. Events with t
 
 ```bash
 curl -i "http://localhost:3000/devices/panel-0042/events?since=2026-09-29T13:00:00Z&limit=2" -H "X-Device-Token: dev-shared-token"
-curl -i "http://localhost:3000/devices/panel-0042/events?limit=2&cursor=17" -H "X-Device-Token: dev-shared-token"
+curl -i "http://localhost:3000<next>" -H "X-Device-Token: dev-shared-token"
 ```
 
 ```json
@@ -189,7 +199,9 @@ curl -i "http://localhost:3000/devices/panel-0042/events?limit=2&cursor=17" -H "
 }
 ```
 
-`next` is `null` on the last page. A device that exists but has no events at or after `since` returns `{ "events": [], "next": null }`.
+The cursor is a database-wide sequence number assigned when an event is stored, so `17` is only an example. Take the value from `next`.
+
+`next` has a value only when more than `limit` events are left to return. Otherwise the page is the last one and `next` is `null`, even if it holds exactly `limit` events. A device that exists but has no events at or after `since` returns `{ "events": [], "next": null }`.
 
 | Status | When                                                            |
 | ------ | --------------------------------------------------------------- |
@@ -219,12 +231,12 @@ Every error, on any route, has the same body:
 
 ## Design decisions
 
-- **NestJS**: I use it every day. Its guards, `ValidationPipe` and dependency injection cover the token check, input validation and the injectable `Clock` without extra libraries.
-- **Postgres**: The ingest endpoint relies on its transactions and `SELECT ... FOR UPDATE` to apply concurrent events correctly, and it supports partitioning for the 10x case.
-- **Plain `pg`, no ORM**: for clear code. Every query is visible SQL, including `ON CONFLICT` for the dedupe and the row comparison behind the history cursor.
+- **NestJS.** I use it every day. Its guards, `ValidationPipe` and dependency injection cover the token check, input validation and the injectable `Clock` without extra libraries. Its module structure makes the service easy to extend with new features. Compared with plain Node.js, where routing, body parsing and validation would be written by hand, the cost is more dependencies and boilerplate.
+- **Postgres.** The ingest endpoint relies on its transactions and `SELECT ... FOR UPDATE` to apply concurrent events correctly, and it supports partitioning for the 10x case.
+- **Plain `pg`, no ORM.** Every query is visible and clear SQL, including `ON CONFLICT` for the dedupe and the row comparison behind the history cursor.
 - **Dedupe in the database.** `(device_id, event_id)` is the primary key and the insert uses `ON CONFLICT DO NOTHING`, so even a simultaneous retry is stored once.
-- Each event is saved in one transaction that locks the device row, so concurrent events can't overwrite each other.
-- The `devices` table holds each device's current state, updated by every new event.
+- **Row lock per device.** Each event is saved in one transaction that locks the device row, so concurrent events can't overwrite each other. Events for the same device wait for each other, but different devices still run in parallel.
+- **Current state in `devices`.** The `devices` table holds each device's current state, updated by every new event. Reads are fast because nothing is rebuilt from the history, but the state and the history must be updated in the same transaction.
 - **One error shape.** A global exception filter returns every error as `{ error, message }`.
 
 ### History pagination
@@ -243,6 +255,18 @@ Every error, on any route, has the same body:
 - Two queries per page: one checks the device and cursor (404/400), then the page query.
 - `seq` is global, so cursors reveal roughly how many events are stored.
 
+### Device list pagination
+
+- **Same contract as the history API:** `limit` (default 50, max 500), `limit + 1` rows fetched, and a relative `next` URL that is `null` on the last page.
+- **The cursor is the last `device_id`.** `id` is the primary key, so `WHERE id > $cursor ORDER BY id` uses its index and needs no lookup. Unlike the history API, any non-empty cursor is a valid position, so only an empty or repeated cursor is a 400.
+- **`next` repeats `status`**, or the next page would stop being filtered.
+- **No index on `last_seen_at`**, because every event updates it, including a heartbeat from every device every minute. An index would have to be updated on every one of these writes, which would slow down the most frequent operation.
+
+**Tradeoffs**
+
+- Status is computed per page, at that request's time. A device that changes status during a walk can be missing from it, but it is never listed twice, because the list is sorted by `id`, which doesn't change.
+- No total count: `count(*)` over millions of devices would be expensive on every page.
+
 ## Assumptions
 
 - The device id is any string. A device is created by its first event; there is no registration step.
@@ -255,7 +279,8 @@ Every error, on any route, has the same body:
 - Heartbeat values have no range check, so an odd reading never rejects a heartbeat.
 - Unknown payload fields are dropped.
 - Status is computed when the device is read, not stored, so it is never stale. A device turns offline only once more than `OFFLINE_AFTER_SECONDS` (default 300) have passed since `last_seen_at`; at exactly `OFFLINE_AFTER_SECONDS` it is still online.
-- The spec makes only an unknown status filter a 400, so `GET /devices` without `status` lists every device. An empty or repeated `status` counts as unknown.
+- The spec makes only an unknown status filter a 400, so `GET /devices` without `status` lists devices of every status. An empty or repeated `status` counts as unknown.
+- `GET /devices` is paginated (`limit` 50 by default, cursor in `next`), although the spec doesn't ask for it. The device list grows without bound, and at 10M devices returning everything in one response isn't an option. This changes the empty result from `{ "devices": [] }` to `{ "devices": [], "next": null }`.
 
 ## Where I used AI tools
 
@@ -272,6 +297,7 @@ I used Claude Code for these parts:
 - The Dockerfile: I wrote the first version, and Claude Code turned it into a multi-stage Alpine build that ships only production dependencies.
 - `docker-compose.yml`: I wrote the Postgres service, and Claude Code added the `app` service that waits for Postgres and connects to it by service name.
 - The history API: I chose cursor pagination; Claude Code proposed the `seq` cursor read in SQL and wrote the endpoint, the query DTO and the tests, and I reviewed them.
+- Pagination for `GET /devices`: I decided to paginate it by default; Claude Code wrote the code and tests, and I reviewed them.
 
 ## Extension: History API
 
@@ -280,4 +306,4 @@ I chose the History API because pagination is something I work with every day. A
 ## What would change at 10x scale
 
 - **Retention.** Heartbeats are most of the rows (one per device per minute), only matter for recent history and don't affect device state, so they can be deleted after a few days. Other events are deleted after a set period, for example 3 to 12 months. A client paging through history that has been deleted gets `cursor is invalid`.
-- **Partition `device_events` by `occurred_at`.** Retention then drops whole old partitions instead of running large `DELETE`s, which are slow and leave dead rows for vacuum. The tradeoff: Postgres requires the partition column in the primary key, so the dedupe key becomes `(device_id, event_id, occurred_at)`. A resent event keeps its `occurred_at`, so it is still caught; `received_at` would not work, since a retry arrives at a new server time.
+- **Partition `device_events` by `occurred_at`.** Retention then drops whole old partitions instead of running large `DELETE`s, which are slow and leave dead rows for vacuum. Postgres requires the partition column in the primary key, so the key becomes `(device_id, event_id, occurred_at)`. The task defines a duplicate by `event_id` alone, so a retry with a different `occurred_at` would no longer be caught. To keep that rule, dedupe in a separate unpartitioned table keyed on `(device_id, event_id)`, inserted in the same transaction. `received_at` would not work as the partition key, since a retry arrives at a new server time.

@@ -6,6 +6,7 @@ import {
 import { Database } from '../database/database';
 import { DeviceEventDto } from './dto/device-event.dto';
 import { EventHistoryQuery } from './dto/event-history-query.dto';
+import { ListDevicesQuery } from './dto/list-devices-query.dto';
 import { Device, DeviceState, DeviceSummary } from './entities/device';
 import { DeviceEvent, HistoryEvent } from './entities/device-event';
 import { applyEvent } from './apply-event';
@@ -17,6 +18,12 @@ import { Clock } from '../shared/clock';
 export interface EventPage {
   events: HistoryEvent[];
   // The seq of the page's last event, or null on the last page.
+  nextCursor: string | null;
+}
+
+export interface DevicePage {
+  devices: { device: DeviceSummary; status: DeviceStatus }[];
+  // The id of the page's last device, or null on the last page.
   nextCursor: string | null;
 }
 
@@ -114,19 +121,23 @@ export class DevicesService {
     return { device, status };
   }
 
-  async findAll(
-    status?: DeviceStatus,
-  ): Promise<{ device: DeviceSummary; status: DeviceStatus }[]> {
+  async findAllByStatus(query: ListDevicesQuery): Promise<DevicePage> {
     const now = this.clock.now();
     const result = await this.selectSummaries(
-      status,
+      query,
       onlineCutoff(now, this.offlineAfterMs),
     );
+    // One extra row tells whether another page exists, so next never leads to an empty page.
+    const rows = result.rows.slice(0, query.limit);
+    const hasMore = result.rows.length > query.limit;
     // The same `now` as the filter, so each row's status matches the filter.
-    return result.rows.map((device) => ({
-      device,
-      status: statusAt(device.last_seen_at, now, this.offlineAfterMs),
-    }));
+    return {
+      devices: rows.map((device) => ({
+        device,
+        status: statusAt(device.last_seen_at, now, this.offlineAfterMs),
+      })),
+      nextCursor: hasMore ? rows[rows.length - 1].id : null,
+    };
   }
 
   async findEvents(
@@ -179,21 +190,33 @@ export class DevicesService {
     }
   }
 
-  private selectSummaries(status: DeviceStatus | undefined, cutoff: Date) {
-    switch (status) {
+  // Keyset on the primary key: each page starts after the cursor id, so
+  // a device is listed at most once per walk.
+  // last_seen_at has no index on purpose: every event updates it.
+  private selectSummaries(query: ListDevicesQuery, cutoff: Date) {
+    const cursor = query.cursor ?? null;
+    const rowLimit = query.limit + 1;
+    switch (query.status) {
       case DeviceStatus.ONLINE:
         return this.db.pool.query<DeviceSummary>(
-          `SELECT id, last_seen_at FROM devices WHERE last_seen_at >= $1 ORDER BY id`,
-          [cutoff],
+          `SELECT id, last_seen_at FROM devices
+           WHERE last_seen_at >= $1 AND ($2::text IS NULL OR id > $2)
+           ORDER BY id LIMIT $3`,
+          [cutoff, cursor, rowLimit],
         );
       case DeviceStatus.OFFLINE:
         return this.db.pool.query<DeviceSummary>(
-          `SELECT id, last_seen_at FROM devices WHERE last_seen_at < $1 ORDER BY id`,
-          [cutoff],
+          `SELECT id, last_seen_at FROM devices
+           WHERE last_seen_at < $1 AND ($2::text IS NULL OR id > $2)
+           ORDER BY id LIMIT $3`,
+          [cutoff, cursor, rowLimit],
         );
       default:
         return this.db.pool.query<DeviceSummary>(
-          `SELECT id, last_seen_at FROM devices ORDER BY id`,
+          `SELECT id, last_seen_at FROM devices
+           WHERE ($1::text IS NULL OR id > $1)
+           ORDER BY id LIMIT $2`,
+          [cursor, rowLimit],
         );
     }
   }
